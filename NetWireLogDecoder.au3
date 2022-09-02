@@ -4,10 +4,11 @@
 #AutoIt3Wrapper_Outfile=netwiredecoder32.exe
 #AutoIt3Wrapper_Outfile_x64=netwiredecoder64.exe
 #AutoIt3Wrapper_Compile_Both=y
+#AutoIt3Wrapper_UseX64=y
 #AutoIt3Wrapper_Change2CUI=y
 #AutoIt3Wrapper_Res_Comment=NetWire Log Decoder
 #AutoIt3Wrapper_Res_Description=NetWire Log Decoder
-#AutoIt3Wrapper_Res_Fileversion=1.0.0.0
+#AutoIt3Wrapper_Res_Fileversion=1.0.0.1
 #AutoIt3Wrapper_AU3Check_Parameters=-w 3 -w 5
 #AutoIt3Wrapper_Run_Au3Stripper=y
 #Au3Stripper_Parameters=/sf /sv /rm
@@ -134,7 +135,8 @@ Else
 	GUICtrlSetFont(-1, 9, $FW_SEMIBOLD,  $GUI_FONTNORMAL, "",  $CLEARTYPE_QUALITY)
 	GUICtrlSetColor(-1, 0xFFFFFF)
 
-	$myctredit = GUICtrlCreateEdit("", 0, 330, 830, 100, BitOR($ES_AUTOVSCROLL,$WS_VSCROLL))
+	$myctredit = GUICtrlCreateEdit("", 0, 330, 830, 100, BitOR($ES_AUTOVSCROLL, $WS_VSCROLL, $ES_READONLY))
+	GUICtrlSetBkColor($myctredit, 0xFFFFFF)
 	_GUICtrlEdit_SetLimitText($myctredit, 128000)
 
 	GUISetState(@SW_SHOW)
@@ -897,81 +899,127 @@ EndFunc
 
 Func _DecodeNetWire($inputfile, $outputFile)
 
+	ConsoleWrite("Parsing: " & $inputfile & @CRLF)
 	Local $logfile = FileOpen($outputFile, 2+32)
 
 	Local $hFile = FileOpen($inputfile, 16)
 	Local $rFile = FileRead($hFile)
-
+	Local $fileSize = FileGetSize($inputfile)
 	Local $length = StringLen($rFile)
-	Local $out = "", $str = "", $hex = ""
+	Local $out = "", $str = "", $outChunks
 
-	Local $invalidCounter = 0
-	Local $testArr
+	Select
+		Case $length < 100000
+			$outChunks = 100
+		Case $length < 1000000
+			$outChunks = 1000
+		Case $length < 10000000
+			$outChunks = 10000
+		Case $length < 100000000
+			$outChunks = 100000
+		Case $length < 1000000000
+			$outChunks = 1000000
+		Case Else
+			$outChunks = 10000000
+	EndSelect
 
-	For $i = 3 To $length Step 2
-		;ConsoleWrite("--" & $i & @CRLF)
+	Local $outChunk = 0, $outChunkSize = Int($length / $outChunks)
+	Local $aOut[$outChunks]
 
-		If $length - $i > 16 Then
-			$hex = StringMid($rFile, $i, 16)
-			$testArr = _HexPrecheck($hex)
-			If Not @error And IsArray($testArr) Then
-				$str  = $testArr[1]
-				;ConsoleWrite(StringMid($hex, 1, $testArr[0]) & " = " & $str & @CRLF)
-				$out &= $str
-				$i += $testArr[0] - 2
-				ContinueLoop
-			EndIf
+	If Mod($outChunkSize, 2) = 0 Then
+		$outChunkSize += 1
+	EndIf
+
+	Local $inChunkSize = 32768
+	Local $inChunks = $fileSize / $inChunkSize
+	$inChunks = Int($inChunks)
+	Local $remainder = Mod($fileSize, $inChunkSize)
+
+	Local $invalidCounter = 0, $testArr
+	Local $currOffset = 3, $currLength = 0
+
+	For $inChunk = 0 To $inChunks
+
+		If $inChunk = $inChunks Then
+			$currLength = $remainder * 2
+		Else
+			$currLength = $inChunkSize * 2
 		EndIf
-		$hex = ""
-		$hex = StringMid($rFile, $i, 2)
 
-		;ConsoleWrite("$hex: " & StringFormat("%s", $hex) & @CRLF)
-		$str = _keyRemapper($hex)
-		If $str = "" Then
-			If $detectInvalid Then
-				$invalidCounter += 1
-				If $invalidCounter > 3 Then
-					$i = $i + (1024 - Mod($i-3, 1024))
-					_DebugOut("Jumping to string offset: " & $i & @CRLF)
-					$invalidCounter = 0
-					$out &= @CRLF
+		$inChunkData = StringMid($rFile, $currOffset, $currLength)
+
+		For $i = 1 To $currLength Step 2
+
+			If Mod($i, $outChunkSize) = 0 Then
+				;ConsoleWrite(Round((($currOffset + $i - 1) / $length) * 100, 2) & " %" & @CRLF)
+				$aOut[$outChunk] = $out
+				$outChunk += 1
+				$out = ""
+			EndIf
+
+			If $currLength - $i > 16 Then
+				$testArr = _HexPrecheck(StringMid($inChunkData, $i, 16))
+				If Not @error And IsArray($testArr) Then
+					$str  = $testArr[1]
+					$out &= $str
+					$i += $testArr[0] - 2
 					ContinueLoop
 				EndIf
 			EndIf
-			$out &= @CRLF
-			ContinueLoop
-		EndIf
-		If $detectInvalid Then
-			If $str == "A" Then
-				; check for sequence of 00's
-				If StringMid($rFile, $i, 8) = "00000000" Then
-;					If StringMid($rFile, $i, 16) = "0000000000000000" Then
+
+			;ConsoleWrite("$hex: " & StringFormat("%s", $hex) & @CRLF)
+			$str = _keyRemapper(StringMid($inChunkData, $i, 2))
+			If $str = "" Then
+				If $detectInvalid Then
+					$invalidCounter += 1
+					If $invalidCounter > 3 Then
+						$i = $i + (1024 - Mod($i-3, 1024))
+						_DebugOut("Jumping to string offset: " & $i & @CRLF)
+						$invalidCounter = 0
+						$out &= @CRLF
+						ContinueLoop
+					EndIf
+				EndIf
+				$out &= @CRLF
+				ContinueLoop
+			EndIf
+			If $detectInvalid Then
+				If $str == "A" Then
+					; check for sequence of 00's
+					If StringMid($inChunkData, $i, 8) = "00000000" Then
 						$i = $i + (1024 - Mod($i-3, 1024))
 						_DebugOut("Jumping to string offset: " & $i & @CRLF)
 						$out &= @CRLF
 						$invalidCounter = 0
 						ContinueLoop
-;					EndIf
+					EndIf
+					;$invalidCounter += 1
+					;ContinueLoop
 				EndIf
-				;$invalidCounter += 1
-				;ContinueLoop
-			EndIf
-			If $str == "F" Then
-				; check for sequence of FF's
-				If StringMid($rFile, $i, 8) = "FFFFFFFF" Then
-					$i = $i + (1024 - Mod($i-3, 1024))
-					_DebugOut("Jumping to string offset: " & $i & @CRLF)
-					$out &= @CRLF
-					$invalidCounter = 0
-					ContinueLoop
+				If $str == "F" Then
+					; check for sequence of FF's
+					If StringMid($inChunkData, $i, 8) = "FFFFFFFF" Then
+						$i = $i + (1024 - Mod($i-3, 1024))
+						_DebugOut("Jumping to string offset: " & $i & @CRLF)
+						$out &= @CRLF
+						$invalidCounter = 0
+						ContinueLoop
+					EndIf
 				EndIf
 			EndIf
-		EndIf
-		;ConsoleWrite($hex & " = " & $str & @CRLF)
-		$out &= $str
+			;ConsoleWrite($hex & " = " & $str & @CRLF)
+			$out &= $str
+		Next
+		$currOffset += $inChunkSize * 2
 	Next
 
-	FileWrite($logfile, $out)
+	Local $sFinal = ""
+	For $i = 0 To $outChunk
+		$sFinal &= $aOut[$i]
+	Next
+	$sFinal &= $out
+
+	FileWrite($logfile, $sFinal)
 
 	FileClose($hFile)
 	FileClose($logfile)
@@ -1013,7 +1061,7 @@ Func _DisplayWrapper($input)
 EndFunc
 
 Func _DisplayInfo($DebugInfo)
-	GUICtrlSetData($myctredit, $DebugInfo, 1)
+	_GUICtrlEdit_AppendText($myctredit, $DebugInfo)
 EndFunc
 
 Func _GuiExitMessage()
@@ -1129,13 +1177,14 @@ Func _GuiGetSettings()
 	$TargetInput = StringReplace($TargetInput, "\\.\", "")
 
 	Local $hDrive
-	If Not StringLeft($TargetInput, 2) = "\\" Then
-		$hDrive = _WinAPI_CreateFileEx("\\.\" & $TargetInput, $OPEN_EXISTING, $GENERIC_READ, BitOR($FILE_SHARE_READ, $FILE_SHARE_WRITE, $FILE_SHARE_DELETE))
+	If StringMid($TargetInput, 1, 4) <> "\\.\" Then
+		$hDrive = _WinAPI_CreateFileEx("\\.\" & $TargetInput, $OPEN_EXISTING, $GENERIC_READ, BitOR($FILE_SHARE_READ, $FILE_SHARE_WRITE, $FILE_SHARE_DELETE), $FILE_ATTRIBUTE_NORMAL)
 	Else
-		$hDrive = _WinAPI_CreateFileEx($TargetInput, $OPEN_EXISTING, $GENERIC_READ, $FILE_SHARE_READ)
+		$hDrive = _WinAPI_CreateFileEx($TargetInput, $OPEN_EXISTING, $GENERIC_READ, BitOR($FILE_SHARE_READ, $FILE_SHARE_WRITE, $FILE_SHARE_DELETE), $FILE_ATTRIBUTE_NORMAL)
 	EndIf
 
 	If Not $hDrive Then
+		_DisplayInfo(_WinAPI_GetLastErrorMessage() & @CRLF)
 		_DisplayInfo("Error: input not valid: " & $TargetInput & @CRLF)
 		Return
 	Else
